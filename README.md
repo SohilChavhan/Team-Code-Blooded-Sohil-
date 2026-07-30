@@ -24,17 +24,6 @@ Traditional cardiovascular monitoring relies on wearable sensors, pulse oximeter
 
 ## 🏗 System Architecture
 
-┌────────────────────────┐      Video Upload      ┌─────────────────────────────┐
-│                        ├───────────────────────►│                             │
-│  React Native / Expo   │                        │  Python FastAPI Server      │
-│     Mobile App         │◄───────────────────────┤  (rPPG Math & OpenCV Engine)│
-└───────────┬────────────┘      JSON Vitals       └──────────────┬──────────────┘
-│                                                    │
-│               ┌──────────────────┐                 │
-└──────────────►│  Supabase Cloud  │◄────────────────┘
-│    (PostgreSQL)  │
-└──────────────────┘
-
 The system operates across three core layers:
 1. **Frontend (React Native & Expo Router):** Multi-portal mobile interface featuring dual dashboards (Patient & Doctor), live camera framing guides, and E-Prescription builders.
 2. **Biometric Engine (Python & FastAPI):** Headless signal processing backend executing facial mesh tracking, color extraction, bandpass filtering, and FFT spectral breakdown.
