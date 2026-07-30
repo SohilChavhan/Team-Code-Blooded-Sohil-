@@ -24,11 +24,12 @@ except Exception as e:
 
 # --- 3. KALMAN FILTER ---
 class KalmanFilter1D:
-    def __init__(self, process_variance=1e-2, measurement_variance=0.1):
+    # Lower q (assume biological HR changes slowly), higher r (distrust the noisy optical sensor)
+    def __init__(self, process_variance=1e-4, measurement_variance=2.0):
         self.estimated_bpm = 0.0
         self.error_covariance = 1.0
         self.q = process_variance  
-        self.r = measurement_variance 
+        self.r = measurement_variance
 
     def update(self, measurement):
         if self.estimated_bpm == 0.0:
@@ -48,9 +49,8 @@ bpm_kalman = KalmanFilter1D()
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# --- ADD THIS: The Background Eraser ---
+# --- THE BACKGROUND ERASER ---
 mp_selfie_segmentation = mp.solutions.selfie_segmentation
-# model_selection=1 is optimized for speed/real-time video
 segmenter = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
 
 cap = cv2.VideoCapture(0)
@@ -91,7 +91,6 @@ FACE_LEFT, FACE_RIGHT = 234, 454
 def butter_bandpass(data, lowcut=0.8, highcut=3.0, fs=30.0):
     if len(data) <= 22: return data
     nyq = 0.5 * fs
-    # Crash Guard: Dynamically scale upper limit if webcam frame drops occur
     safe_highcut = min(highcut, nyq - 0.05)
     if lowcut >= safe_highcut: return data 
     b, a = butter(3, [lowcut / nyq, safe_highcut / nyq], btype='band')
@@ -133,34 +132,29 @@ def draw_face_anchored_graph(frame, wave_data, gx, gy, gw, gh, accuracy):
         cv2.line(frame, points[i - 1], points[i], line_color, 3)
 
 frame_count = 0
+condition = None 
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret: break
 
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    # --- THE DIGITAL GREEN SCREEN ---
-    # Convert to RGB for MediaPipe processing
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # ==================================================
+    # OPTIMIZED GREEN SCREEN LOOP
+    # ==================================================
+    frame_count += 1
     
-    # Process the frame to find your exact silhouette
-    seg_results = segmenter.process(rgb_frame)
-    
-    # Create a mask where you are (confidence > 50%)
-    condition = np.stack((seg_results.segmentation_mask,) * 3, axis=-1) > 0.5
-    
-    # Create a pure black background canvas
+    if frame_count % 3 == 0 or condition is None:
+        rgb_frame_for_seg = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        seg_results = segmenter.process(rgb_frame_for_seg)
+        condition = np.stack((seg_results.segmentation_mask,) * 3, axis=-1) > 0.1
+        
     black_bg = np.zeros(frame.shape, dtype=np.uint8)
-    
-    # Merge them: Keep only your pixels, turn everything else black
     frame = np.where(condition, frame, black_bg)
+    frame = np.ascontiguousarray(frame, dtype=np.uint8)
+    # ==================================================
         
     current_time = time.time()
     h, w, _ = frame.shape
-    frame_count += 1
     
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb_frame)
@@ -200,7 +194,6 @@ while cap.isOpened():
             if motion_magnitude > MOTION_THRESHOLD:
                 accuracy_score -= 30
                 advice_text, advice_color = "HOLD STILL - HEAD MOVED", (0, 165, 255)
-                # FIX: If heavy motion clears the buffer, forcefully reset the UI so it doesn't freeze
                 if motion_magnitude > 20.0:
                     timestamps.clear(); rgb_buffer.clear(); wave_history.clear()
                     display_bpm = 0.0; current_stress_score = 0
@@ -230,7 +223,6 @@ while cap.isOpened():
             baseline_brow_ratio = np.mean(brow_ratio_buffer)
             current_stress_score = 0
         else:
-            # Measure deviation from baseline brow ratio (Furrowing)
             strain = (baseline_brow_ratio - current_brow_ratio) / max(0.001, baseline_brow_ratio)
             raw_stress = max(0, min(100, strain * 400)) 
             current_stress_score = int(0.8 * current_stress_score + 0.2 * raw_stress)
@@ -277,10 +269,12 @@ while cap.isOpened():
                 if snr_margin > 2.0:
                     if motion_magnitude > 4.0: diagnostic_reason = "MICRO-MOTION ARTIFACTS"
                     elif ambient_brightness < 70 or ambient_brightness > 230: diagnostic_reason = "POOR LIGHTING CONDITIONS"
-                    else: diagnostic_reason = "CAMERA AUTO-EXPOSURE SHIFTS"; bpm_kalman.r = 0.5 
+                    else: 
+                        diagnostic_reason = "CAMERA AUTO-EXPOSURE SHIFTS"
+                        bpm_kalman.r = 20.0 # HEAVY DAMPING: Ignore the noisy sensor almost entirely
                 else:
                     diagnostic_reason = "CLEAN OPTICAL SIGNAL"
-                    bpm_kalman.r = 0.05 
+                    bpm_kalman.r = 3.0 # NORMAL DAMPING: Trust the sensor a bit more, but still smooth it
 
                 current_live_bpm = bpm_kalman.update(raw_bpm)
                 
@@ -317,20 +311,18 @@ while cap.isOpened():
         cv2.putText(frame, f"LIVE PULSE: {current_live_bpm:.0f} BPM", (30, 130), cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 0), 2)
         cv2.putText(frame, f"4s AVERAGE: {display_bpm:.0f} BPM", (30, 175), cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 0), 3)
         margin_color = (0, 255, 0) if display_margin <= 2.0 else (0, 165, 255)
-        # ENLARGED MARGIN FONT
         cv2.putText(frame, f"MARGIN: +/- {display_margin:.1f} BPM", (30, 220), cv2.FONT_HERSHEY_DUPLEX, 0.85, margin_color, 2)
         cv2.putText(frame, f"REASON: {display_reason}", (30, 255), cv2.FONT_HERSHEY_DUPLEX, 0.65, (200, 200, 200), 1)
     else:
         cv2.putText(frame, f"CALIBRATING BASELINE: {progress}%", (30, 135), cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 255, 255), 2)
 
     # --- TOP RIGHT HUD (Cognitive & Demographics Panel) ---
-    panel_x = w - 450 # Widened panel slightly to fit larger text
+    panel_x = w - 450
     if is_calibrated:
-        cv2.rectangle(frame, (panel_x, 15), (w - 15, 220), (15, 15, 15), -1) # Taller panel
+        cv2.rectangle(frame, (panel_x, 15), (w - 15, 220), (15, 15, 15), -1)
         cv2.rectangle(frame, (panel_x, 15), (w - 15, 220), (100, 100, 100), 1)
         
         cv2.putText(frame, "DEMOGRAPHIC PROFILE", (panel_x + 15, 45), cv2.FONT_HERSHEY_DUPLEX, 0.6, (150, 150, 150), 1)
-        # ENLARGED AGE FONT
         cv2.putText(frame, f"AGE: {display_age_bracket}", (panel_x + 15, 85), cv2.FONT_HERSHEY_DUPLEX, 1.1, (255, 255, 255), 2)
         
         stress_text, stress_color = "NOMINAL", (0, 255, 0)
@@ -339,7 +331,6 @@ while cap.isOpened():
         
         cv2.line(frame, (panel_x + 15, 110), (w - 30, 110), (80, 80, 80), 1)
         
-        # ENLARGED COGNITIVE LOAD FONT
         cv2.putText(frame, f"COGNITIVE LOAD: {current_stress_score}%", (panel_x + 15, 150), cv2.FONT_HERSHEY_DUPLEX, 0.85, (150, 150, 150), 2)
         cv2.putText(frame, stress_text, (panel_x + 15, 190), cv2.FONT_HERSHEY_DUPLEX, 0.9, stress_color, 2)
 
