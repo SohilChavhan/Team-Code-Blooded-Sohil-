@@ -1,83 +1,121 @@
 import cv2
 import numpy as np
 import time
+import math
 from scipy.signal import butter, filtfilt
 import mediapipe as mp
 
-# --- PARAMETERS ---
-BUFFER_SECONDS = 10 
-MOTION_THRESHOLD = 4.0
-BPM_JUMP_LIMIT = 15.0
+# --- 1. PARAMETERS ---
+INITIAL_BUFFER_SECONDS = 10  
+ACTIVE_BUFFER_SECONDS = 5    
+UI_REFRESH_SECONDS = 4.0     
+MOTION_THRESHOLD = 8.0
 GRAPH_HISTORY_SIZE = 120 
 
+# --- 2. AGE DETECTION MODEL SETUP (OPENCV DNN) ---
+try:
+    age_net = cv2.dnn.readNetFromCaffe("age_deploy.prototxt", "age_net.caffemodel")
+    AGE_CLASSES = ['[0-2]', '[4-6]', '[8-12]', '[15-20]', '[25-32]', '[38-43]', '[48-53]', '[60+]']
+    has_age_net = True
+    print("[SYSTEM] Age DNN Module Loaded Successfully.")
+except:
+    has_age_net = False
+    print("[WARNING] Age weights missing. Running Demographic Module in Demo Mode.")
+
+# --- 3. KALMAN FILTER ---
+class KalmanFilter1D:
+    def __init__(self, process_variance=1e-2, measurement_variance=0.1):
+        self.estimated_bpm = 0.0
+        self.error_covariance = 1.0
+        self.q = process_variance  
+        self.r = measurement_variance 
+
+    def update(self, measurement):
+        if self.estimated_bpm == 0.0:
+            self.estimated_bpm = measurement
+            return self.estimated_bpm
+            
+        prediction = self.estimated_bpm
+        error_cov_pred = self.error_covariance + self.q
+        kalman_gain = error_cov_pred / (error_cov_pred + self.r)
+
+        self.estimated_bpm = prediction + kalman_gain * (measurement - prediction)
+        self.error_covariance = (1 - kalman_gain) * error_cov_pred
+        
+        return self.estimated_bpm
+
+bpm_kalman = KalmanFilter1D()
 mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=False,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
+face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 cap.set(cv2.CAP_PROP_FPS, 30)
+cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0) 
 
-window_name = 'Omni-Pulse Biometric HUD'
+window_name = 'Omni-Pulse Biometric Intelligence HUD'
 cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(window_name, 1280, 720)
 
-timestamps = []
-rgb_buffer = []
-bpm_history = []
-wave_history = []  
-stable_bpm = 0.0
+# --- ENGINE STATE VARIABLES ---
+timestamps, rgb_buffer, wave_history = [], [], []
 prev_nose_pos = None
 
-def butter_bandpass(data, lowcut=0.8, highcut=2.5, fs=30.0):
-    # CRASH FIX: SciPy filtfilt requires strictly > 21 data points for padlen
-    if len(data) <= 22:
-        return data
+snr_margin, motion_magnitude, ambient_brightness = 0.0, 0.0, 0.0
+diagnostic_reason = "ACQUIRING..."
+
+# UI Display Locks
+current_live_bpm, display_bpm, display_margin = 0.0, 0.0, 0.0
+display_reason = "CALIBRATING..."
+last_ui_update = 0.0
+
+# Cognitive Stress State
+baseline_brow_ratio = 0.0
+brow_ratio_buffer = []
+current_stress_score = 0
+display_age_bracket = "[18-25] (Demo)"
+
+# Landmarks
+FOREHEAD = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323]
+CHEEK_LEFT = [118, 119, 100, 126, 209, 49, 129, 103, 54, 68]
+CHEEK_RIGHT = [347, 348, 329, 355, 429, 279, 358, 332, 284, 298]
+BROW_INNER_L, BROW_INNER_R = 107, 336
+FACE_LEFT, FACE_RIGHT = 234, 454
+
+def butter_bandpass(data, lowcut=0.8, highcut=3.0, fs=30.0):
+    if len(data) <= 22: return data
     nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(3, [low, high], btype='band')
+    # Crash Guard: Dynamically scale upper limit if webcam frame drops occur
+    safe_highcut = min(highcut, nyq - 0.05)
+    if lowcut >= safe_highcut: return data 
+    b, a = butter(3, [lowcut / nyq, safe_highcut / nyq], btype='band')
     return filtfilt(b, a, data)
 
 def extract_roi_mean(frame, landmarks, indices, w, h):
     mask = np.zeros((h, w), dtype=np.uint8)
     points = np.array([[(int(landmarks[i].x * w), int(landmarks[i].y * h)) for i in indices]])
     cv2.fillPoly(mask, points, 255)
-    mean_color = cv2.mean(frame, mask=mask)[:3]
-    return [mean_color[2], mean_color[1], mean_color[0]]
+    mean_c = cv2.mean(frame, mask=mask)[:3]
+    return [mean_c[2], mean_c[1], mean_c[0]] 
 
 def draw_face_anchored_graph(frame, wave_data, gx, gy, gw, gh, accuracy):
-    """Draws large live optical waveform directly beneath the face boundary."""
-    if gw < 150 or gh < 50:
-        return
-    
-    # Dark High-Contrast Background Card
+    if gw < 150 or gh < 50: return
     overlay = frame.copy()
-    cv2.rectangle(overlay, (gx, gy), (gx + gw, gy + gh), (10, 10, 10), -1)
+    cv2.rectangle(overlay, (gx, gy), (gx + gw, gy + gh), (10, 10, 12), -1)
     cv2.addWeighted(overlay, 0.75, frame, 0.25, 0, frame)
     
     border_color = (0, 255, 0) if accuracy >= 75 else ((0, 255, 255) if accuracy >= 50 else (0, 0, 255))
     cv2.rectangle(frame, (gx, gy), (gx + gw, gy + gh), border_color, 3)
-    
-    # Centerline grid
     cv2.line(frame, (gx, gy + gh // 2), (gx + gw, gy + gh // 2), (80, 80, 80), 1)
-    cv2.putText(frame, "LIVE PULSE WAVEFORM", (gx + 12, gy + 24), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
+    cv2.putText(frame, "LIVE POS OPTICAL WAVEFORM", (gx + 12, gy + 24), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
 
-    if len(wave_data) < 2:
-        return
-
+    if len(wave_data) < 2: return
     wave_arr = np.array(wave_data)
     ptp = np.ptp(wave_arr)
-    if ptp < 1e-5:
-        return
+    if ptp < 1e-5: return
         
     norm_wave = (wave_arr - np.min(wave_arr)) / ptp
-    
     points = []
     step = gw / max(1, GRAPH_HISTORY_SIZE - 1)
     for i in range(len(norm_wave)):
@@ -87,170 +125,201 @@ def draw_face_anchored_graph(frame, wave_data, gx, gy, gw, gh, accuracy):
 
     line_color = (0, 255, 127) if accuracy >= 60 else (0, 165, 255)
     for i in range(1, len(points)):
-        cv2.line(frame, points[i - 1], points[i], line_color, 3) # Thicker wave line
+        cv2.line(frame, points[i - 1], points[i], line_color, 3)
 
-FOREHEAD_INDICES = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323]
-CHEEK_LEFT = [118, 119, 100, 126, 209, 49, 129, 103, 54, 68]
-CHEEK_RIGHT = [347, 348, 329, 355, 429, 279, 358, 332, 284, 298]
-
-print("Engine starting cleanly...")
+frame_count = 0
 
 while cap.isOpened():
     ret, frame = cap.read()
-    if not ret:
-        break
+    if not ret: break
         
     current_time = time.time()
     h, w, _ = frame.shape
+    frame_count += 1
     
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(rgb_frame)
 
     accuracy_score = 100
-    advice_text = "OPTIMAL LIGHTING & POSITION"
-    advice_color = (0, 255, 0)
+    progress = 0
+    is_calibrated = False
+    advice_text, advice_color = "OPTIMAL TRACKING", (0, 255, 0)
     
     if not results.multi_face_landmarks:
-        timestamps.clear()
-        rgb_buffer.clear()
-        wave_history.clear()
-        prev_nose_pos = None
-        accuracy_score = 0
-        advice_text = "NO FACE DETECTED"
+        timestamps.clear(); rgb_buffer.clear(); wave_history.clear(); brow_ratio_buffer.clear()
+        prev_nose_pos = None; bpm_kalman.estimated_bpm = 0.0 
+        current_live_bpm, display_bpm, baseline_brow_ratio = 0.0, 0.0, 0.0
+        accuracy_score, advice_text, diagnostic_reason = 0, "NO FACE DETECTED", "TARGET LOST"
         advice_color = (0, 0, 255)
     else:
         landmarks = results.multi_face_landmarks[0].landmark
         
-        # Face Bounds
-        x_coords = [int(l.x * w) for l in landmarks]
-        y_coords = [int(l.y * h) for l in landmarks]
+        # Bounding box mapping
+        x_coords, y_coords = [int(l.x * w) for l in landmarks], [int(l.y * h) for l in landmarks]
         min_x, max_x = max(0, min(x_coords)), min(w, max(x_coords))
         min_y, max_y = max(0, min(y_coords)), min(h, max(y_coords))
-        face_w = max_x - min_x
+        face_w, face_h = max_x - min_x, max_y - min_y
         
-        # Motion Check (Nose tip)
+        # --- LAYER B: COGNITIVE STRESS (Facial Strain) ---
+        brow_dist = math.dist((landmarks[BROW_INNER_L].x * w, landmarks[BROW_INNER_L].y * h),
+                              (landmarks[BROW_INNER_R].x * w, landmarks[BROW_INNER_R].y * h))
+        face_width = math.dist((landmarks[FACE_LEFT].x * w, landmarks[FACE_LEFT].y * h),
+                               (landmarks[FACE_RIGHT].x * w, landmarks[FACE_RIGHT].y * h))
+        
+        current_brow_ratio = brow_dist / max(1.0, face_width)
+        
+        # Motion check & Freeze Fix
         nose_x, nose_y = int(landmarks[4].x * w), int(landmarks[4].y * h)
         if prev_nose_pos is not None:
-            movement = np.sqrt((nose_x - prev_nose_pos[0])**2 + (nose_y - prev_nose_pos[1])**2)
-            if movement > MOTION_THRESHOLD:
-                timestamps.clear()
-                rgb_buffer.clear()
-                wave_history.clear()
-                accuracy_score -= 40
-                advice_text = "HOLD STILL - HEAD MOVED"
-                advice_color = (0, 165, 255)
-        
+            motion_magnitude = math.dist((nose_x, nose_y), prev_nose_pos)
+            if motion_magnitude > MOTION_THRESHOLD:
+                accuracy_score -= 30
+                advice_text, advice_color = "HOLD STILL - HEAD MOVED", (0, 165, 255)
+                # FIX: If heavy motion clears the buffer, forcefully reset the UI so it doesn't freeze
+                if motion_magnitude > 20.0:
+                    timestamps.clear(); rgb_buffer.clear(); wave_history.clear()
+                    display_bpm = 0.0; current_stress_score = 0
         prev_nose_pos = (nose_x, nose_y)
 
-        # Color Extraction
-        fh_rgb = extract_roi_mean(frame, landmarks, FOREHEAD_INDICES, w, h)
+        # --- LAYER A: CARDIOVASCULAR POS ENGINE ---
+        fh_rgb = extract_roi_mean(frame, landmarks, FOREHEAD, w, h)
         cl_rgb = extract_roi_mean(frame, landmarks, CHEEK_LEFT, w, h)
         cr_rgb = extract_roi_mean(frame, landmarks, CHEEK_RIGHT, w, h)
-        
         master_rgb = np.mean([fh_rgb, cl_rgb, cr_rgb], axis=0)
-        
-        # Lighting Check
-        brightness = np.mean(master_rgb)
-        if brightness < 70:
-            accuracy_score -= 30
-            advice_text = "TOO DARK - INCREASE LIGHT"
-            advice_color = (0, 165, 255)
-        elif brightness > 220:
-            accuracy_score -= 25
-            advice_text = "TOO BRIGHT / OVEREXPOSED"
-            advice_color = (0, 165, 255)
-
-        # Forehead Shadow Check
-        fh_brightness = np.mean(fh_rgb)
-        cheek_brightness = np.mean([cl_rgb, cr_rgb])
-        if fh_brightness < cheek_brightness * 0.70:
-            accuracy_score -= 20
-            if advice_text == "OPTIMAL LIGHTING & POSITION":
-                advice_text = "CLEAR HAIR FROM FOREHEAD"
-                advice_color = (0, 255, 255)
+        ambient_brightness = np.mean(master_rgb)
 
         timestamps.append(current_time)
         rgb_buffer.append(master_rgb)
 
         actual_fps = (len(timestamps) - 1) / (timestamps[-1] - timestamps[0]) if len(timestamps) > 1 else 30.0
-        target_size = int(actual_fps * BUFFER_SECONDS)
+        is_calibrated = (len(timestamps) >= int(actual_fps * INITIAL_BUFFER_SECONDS))
+        target_buffer_size = int(actual_fps * ACTIVE_BUFFER_SECONDS) if is_calibrated else int(actual_fps * INITIAL_BUFFER_SECONDS)
 
-        if len(rgb_buffer) > target_size:
+        if len(rgb_buffer) > target_buffer_size:
             timestamps.pop(0)
             rgb_buffer.pop(0)
 
-        # LIVE WAVEFORM GENERATION (Starts once we hit > 22 frames)
+        # Baseline logic for Stress Engine
+        if not is_calibrated:
+            brow_ratio_buffer.append(current_brow_ratio)
+            baseline_brow_ratio = np.mean(brow_ratio_buffer)
+            current_stress_score = 0
+        else:
+            # Measure deviation from baseline brow ratio (Furrowing)
+            strain = (baseline_brow_ratio - current_brow_ratio) / max(0.001, baseline_brow_ratio)
+            raw_stress = max(0, min(100, strain * 400)) 
+            current_stress_score = int(0.8 * current_stress_score + 0.2 * raw_stress)
+
         if len(rgb_buffer) > 22:
             rgb_arr = np.array(rgb_buffer)
-            mean_c = np.mean(rgb_arr, axis=0)
-            norm_rgb = rgb_arr / (mean_c + 1e-6)
+            norm_rgb = rgb_arr / (np.mean(rgb_arr, axis=0) + 1e-6)
             
-            X = 3 * norm_rgb[:, 0] - 2 * norm_rgb[:, 1]
-            Y = 1.5 * norm_rgb[:, 0] + norm_rgb[:, 1] - 1.5 * norm_rgb[:, 2]
+            X, Y = norm_rgb[:, 1] - norm_rgb[:, 2], norm_rgb[:, 1] + norm_rgb[:, 2] - 2 * norm_rgb[:, 0]    
             
-            time_arr = np.array(timestamps)
-            uniform_time = np.linspace(time_arr[0], time_arr[-1], len(time_arr))
+            t_arr = np.array(timestamps)
+            u_time = np.linspace(t_arr[0], t_arr[-1], len(t_arr))
             
-            X_interp = np.interp(uniform_time, time_arr, X)
-            Y_interp = np.interp(uniform_time, time_arr, Y)
+            X_f = butter_bandpass(np.interp(u_time, t_arr, X), fs=actual_fps)
+            Y_f = butter_bandpass(np.interp(u_time, t_arr, Y), fs=actual_fps)
             
-            X_f = butter_bandpass(X_interp, fs=actual_fps)
-            Y_f = butter_bandpass(Y_interp, fs=actual_fps)
+            pos_signal = X_f + (np.std(X_f) / (np.std(Y_f) + 1e-6)) * Y_f
             
-            alpha = np.std(X_f) / (np.std(Y_f) + 1e-6)
-            chrom_signal = X_f - alpha * Y_f
-            
-            wave_history.append(chrom_signal[-1])
-            if len(wave_history) > GRAPH_HISTORY_SIZE:
-                wave_history.pop(0)
+            wave_history.append(pos_signal[-1])
+            if len(wave_history) > GRAPH_HISTORY_SIZE: wave_history.pop(0)
 
-        # FULL 10s BUFFER COMPUTATION FOR STABLE BPM
-        progress = min(100, int((len(rgb_buffer) / target_size) * 100)) if target_size > 0 else 0
+        progress = min(100, int((len(rgb_buffer) / target_buffer_size) * 100))
 
-        if len(rgb_buffer) >= target_size and actual_fps > 15:
-            windowed_signal = chrom_signal * np.hanning(len(chrom_signal))
+        if len(rgb_buffer) >= target_buffer_size and actual_fps > 15:
+            windowed_signal = pos_signal * np.hanning(len(pos_signal))
             fft_size = len(windowed_signal) * 4
             fft_data = np.abs(np.fft.rfft(windowed_signal, n=fft_size))
             freqs = np.fft.rfftfreq(fft_size, 1.0 / actual_fps)
 
-            valid_idx = np.where((freqs >= 0.8) & (freqs <= 2.5))[0]
+            valid_idx = np.where((freqs >= 0.8) & (freqs <= 3.0))[0] 
 
             if len(valid_idx) > 0:
                 peak_idx = valid_idx[np.argmax(fft_data[valid_idx])]
                 raw_bpm = freqs[peak_idx] * 60.0
 
-                if stable_bpm == 0.0 or abs(raw_bpm - stable_bpm) < BPM_JUMP_LIMIT:
-                    bpm_history.append(raw_bpm)
-                    if len(bpm_history) > 10:
-                        bpm_history.pop(0)
-                    stable_bpm = np.median(bpm_history)
+                peak_power = np.sum(fft_data[max(0, peak_idx-2):peak_idx+3])
+                total_power = np.sum(fft_data[valid_idx]) + 1e-6
+                snr = peak_power / total_power 
+                
+                if snr > 0.40: snr_margin = 1.0  
+                elif snr > 0.25: snr_margin = 3.0 
+                else: snr_margin = 6.0            
+                
+                if snr_margin > 2.0:
+                    if motion_magnitude > 4.0: diagnostic_reason = "MICRO-MOTION ARTIFACTS"
+                    elif ambient_brightness < 70 or ambient_brightness > 230: diagnostic_reason = "POOR LIGHTING CONDITIONS"
+                    else: diagnostic_reason = "CAMERA AUTO-EXPOSURE SHIFTS"; bpm_kalman.r = 0.5 
+                else:
+                    diagnostic_reason = "CLEAN OPTICAL SIGNAL"
+                    bpm_kalman.r = 0.05 
 
-        # Draw Face Dots
-        for idx in FOREHEAD_INDICES + CHEEK_LEFT + CHEEK_RIGHT:
+                current_live_bpm = bpm_kalman.update(raw_bpm)
+                
+                if current_time - last_ui_update >= UI_REFRESH_SECONDS or display_bpm == 0.0:
+                    display_bpm = current_live_bpm
+                    display_margin = snr_margin
+                    display_reason = diagnostic_reason
+                    last_ui_update = current_time
+
+        # --- LAYER C: DEMOGRAPHICS (Age Detection) ---
+        if has_age_net and is_calibrated and frame_count % 30 == 0:
+            face_roi = frame[max(0, min_y):min(h, max_y), max(0, min_x):min(w, max_x)]
+            if face_roi.size > 0:
+                blob = cv2.dnn.blobFromImage(face_roi, 1.0, (227, 227), (78.4263377603, 87.7689143744, 114.895847746), swapRB=False)
+                age_net.setInput(blob)
+                age_preds = age_net.forward()
+                display_age_bracket = AGE_CLASSES[age_preds[0].argmax()]
+
+        # Rendering Graphics
+        for idx in FOREHEAD + CHEEK_LEFT + CHEEK_RIGHT:
             cx, cy = int(landmarks[idx].x * w), int(landmarks[idx].y * h)
-            cv2.circle(frame, (cx, cy), 2, (0, 255, 0), -1)
+            cv2.circle(frame, (cx, cy), 1, (0, 255, 0), -1)
 
-        # Large Anchored Graph Box
-        graph_w = max(320, face_w)
-        graph_h = 100
-        graph_x = max(15, min(w - graph_w - 15, min_x))
-        graph_y = min(h - graph_h - 15, max_y + 20)
-        
+        graph_w, graph_h = max(320, face_w), 100
+        graph_x, graph_y = max(15, min(w - graph_w - 15, min_x)), min(h - graph_h - 15, max_y + 20)
         draw_face_anchored_graph(frame, wave_history, graph_x, graph_y, graph_w, graph_h, accuracy_score)
 
-    # --- BOLD / LARGE TOP HUD OVERLAY ---
+    # --- TOP LEFT HUD (Cardiovascular & Diagnostics) ---
     acc_color = (0, 255, 0) if accuracy_score > 70 else (0, 165, 255)
-    cv2.putText(frame, f"ACCURACY: {max(0, accuracy_score)}%", (30, 50), cv2.FONT_HERSHEY_DUPLEX, 1.3, acc_color, 3)
-    cv2.putText(frame, f"ACTION: {advice_text}", (30, 95), cv2.FONT_HERSHEY_DUPLEX, 0.85, advice_color, 2)
+    cv2.putText(frame, f"ACCURACY: {max(0, accuracy_score)}%", (30, 45), cv2.FONT_HERSHEY_DUPLEX, 1.0, acc_color, 2)
+    cv2.putText(frame, f"ACTION: {advice_text}", (30, 80), cv2.FONT_HERSHEY_DUPLEX, 0.7, advice_color, 1)
 
-    if stable_bpm > 0:
-        cv2.putText(frame, f"PULSE: {stable_bpm:.0f} BPM", (30, 150), cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 0), 3)
+    if display_bpm > 0:
+        cv2.putText(frame, f"LIVE PULSE: {current_live_bpm:.0f} BPM", (30, 130), cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 255, 0), 2)
+        cv2.putText(frame, f"4s AVERAGE: {display_bpm:.0f} BPM", (30, 175), cv2.FONT_HERSHEY_DUPLEX, 1.4, (0, 255, 0), 3)
+        margin_color = (0, 255, 0) if display_margin <= 2.0 else (0, 165, 255)
+        # ENLARGED MARGIN FONT
+        cv2.putText(frame, f"MARGIN: +/- {display_margin:.1f} BPM", (30, 220), cv2.FONT_HERSHEY_DUPLEX, 0.85, margin_color, 2)
+        cv2.putText(frame, f"REASON: {display_reason}", (30, 255), cv2.FONT_HERSHEY_DUPLEX, 0.65, (200, 200, 200), 1)
     else:
-        cv2.putText(frame, f"CALIBRATING: {progress}%", (30, 150), cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 255, 255), 2)
+        cv2.putText(frame, f"CALIBRATING BASELINE: {progress}%", (30, 135), cv2.FONT_HERSHEY_DUPLEX, 1.1, (0, 255, 255), 2)
+
+    # --- TOP RIGHT HUD (Cognitive & Demographics Panel) ---
+    panel_x = w - 450 # Widened panel slightly to fit larger text
+    if is_calibrated:
+        cv2.rectangle(frame, (panel_x, 15), (w - 15, 220), (15, 15, 15), -1) # Taller panel
+        cv2.rectangle(frame, (panel_x, 15), (w - 15, 220), (100, 100, 100), 1)
+        
+        cv2.putText(frame, "DEMOGRAPHIC PROFILE", (panel_x + 15, 45), cv2.FONT_HERSHEY_DUPLEX, 0.6, (150, 150, 150), 1)
+        # ENLARGED AGE FONT
+        cv2.putText(frame, f"AGE: {display_age_bracket}", (panel_x + 15, 85), cv2.FONT_HERSHEY_DUPLEX, 1.1, (255, 255, 255), 2)
+        
+        stress_text, stress_color = "NOMINAL", (0, 255, 0)
+        if current_stress_score > 30: stress_text, stress_color = "ELEVATED", (0, 255, 255)
+        if current_stress_score > 60: stress_text, stress_color = "HIGH STRAIN", (0, 0, 255)
+        
+        cv2.line(frame, (panel_x + 15, 110), (w - 30, 110), (80, 80, 80), 1)
+        
+        # ENLARGED COGNITIVE LOAD FONT
+        cv2.putText(frame, f"COGNITIVE LOAD: {current_stress_score}%", (panel_x + 15, 150), cv2.FONT_HERSHEY_DUPLEX, 0.85, (150, 150, 150), 2)
+        cv2.putText(frame, stress_text, (panel_x + 15, 190), cv2.FONT_HERSHEY_DUPLEX, 0.9, stress_color, 2)
 
     cv2.imshow(window_name, frame)
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    if cv2.waitKey(1) & 0xFF == ord('q'): break
 
 cap.release()
 cv2.destroyAllWindows()
