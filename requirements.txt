@@ -2,3 +2,7 @@ opencv-python
 numpy<2
 scipy
 mediapipe==0.10.14
+
+fastapi
+uvicorn
+websockets
