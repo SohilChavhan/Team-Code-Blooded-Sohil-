@@ -48,6 +48,11 @@ bpm_kalman = KalmanFilter1D()
 mp_face_mesh = mp.solutions.face_mesh
 face_mesh = mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=False, min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
+# --- ADD THIS: The Background Eraser ---
+mp_selfie_segmentation = mp.solutions.selfie_segmentation
+# model_selection=1 is optimized for speed/real-time video
+segmenter = mp_selfie_segmentation.SelfieSegmentation(model_selection=1)
+
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
@@ -132,6 +137,26 @@ frame_count = 0
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret: break
+
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # --- THE DIGITAL GREEN SCREEN ---
+    # Convert to RGB for MediaPipe processing
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    
+    # Process the frame to find your exact silhouette
+    seg_results = segmenter.process(rgb_frame)
+    
+    # Create a mask where you are (confidence > 50%)
+    condition = np.stack((seg_results.segmentation_mask,) * 3, axis=-1) > 0.5
+    
+    # Create a pure black background canvas
+    black_bg = np.zeros(frame.shape, dtype=np.uint8)
+    
+    # Merge them: Keep only your pixels, turn everything else black
+    frame = np.where(condition, frame, black_bg)
         
     current_time = time.time()
     h, w, _ = frame.shape
