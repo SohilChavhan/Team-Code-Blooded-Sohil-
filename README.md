@@ -8,7 +8,6 @@
 - [Overview]
 - [System Architecture]
 - [Biological Science Behind rPPG]
-- [Mathematical & Signal Processing Pipeline]
 - [Key Features]
 - [Tech Stack]
 - [Getting Started]
@@ -53,52 +52,6 @@ The face is chosen due to its high concentration of thin-skinned capillary beds 
 
 ### 4. Facial Strain & Cognitive Stress Mechanics
 Cognitive stress and mental strain activate the *corrugator supercilii* muscle, causing involuntary brow furrowing. By tracking the distance ratio between inner brow landmarks ($\text{Landmarks 107, 336}$) and facial width ($\text{Landmarks 234, 454}$), OMNI-PULSE quantifies facial strain against a baseline to calculate a **Cognitive Load Score (%)**.
-
----
-
-## 🧮 Mathematical & Signal Processing Pipeline
-
-### 1. Spatial ROI Averaging
-To eliminate camera sensor noise, color channels are averaged across all valid pixels $N$ inside the facial ROI masks for each video frame:
-
-$$\mathbf{C}_{mean}(t) = \frac{1}{N} \sum_{i=1}^{N} \begin{bmatrix} R_i(t) \\ G_i(t) \\ B_i(t) \end{bmatrix}$$
-
-### 2. Zero-Mean Normalization
-Color vectors are normalized by their temporal mean intensity $\mu_C$ to eliminate brightness variations across different lighting environments and skin complexions:
-
-$$C_{norm}(t) = \frac{C(t)}{\mu_C}$$
-
-### 3. Plane-Orthogonal-to-Skin (POS) Algorithm
-The normalized RGB signals are projected into two orthogonal chrominance vectors ($X$ and $Y$) to isolate the pulse signal from surface specular reflection and head motion noise:
-
-$$X(t) = G(t) - B(t)$$
-
-$$Y(t) = G(t) + B(t) - 2R(t)$$
-
-An adaptive ratio $\alpha$ blends $X(t)$ and $Y(t)$ based on their standard deviations:
-
-$$\alpha = \frac{\sigma(X_{filtered})}{\sigma(Y_{filtered})}$$
-
-$$S(t) = X_{filtered}(t) + \alpha \cdot Y_{filtered}(t)$$
-
-### 4. Digital Butterworth Bandpass Filter
-A 3rd-order Butterworth bandpass filter suppresses frequencies outside human heart rates ($0.8\text{ Hz} - 3.0\text{ Hz} \equiv 48 - 180\text{ BPM}$):
-
-$$H(s) = \frac{1}{1 + \epsilon^2 \left(\frac{s}{\omega_c}\right)^{2n}}$$
-
-### 5. Fast Fourier Transform (FFT) & Peak Extraction
-The filtered time-series signal $S(t)$ is multiplied by a Hanning window to prevent edge leakage, zero-padded, and converted to a frequency spectrum $P(f)$:
-
-$$P(f) = \sum_{n=0}^{N-1} S(n) \cdot e^{-i 2 \pi f n / N}$$
-
-$$\text{BPM} = f_{peak} \times 60 \quad \text{where } f_{peak} = \arg\max_{f \in [0.8, 3.0]} P(f)$$
-
-### 6. 1D Kalman Filtering
-To remove micro-motion artifacts, estimated BPM readings are updated through a 1D Kalman filter:
-
-$$K_k = \frac{P_k^-}{P_k^- + R}$$
-
-$$\hat{x}_k = \hat{x}_k^- + K_k \left( z_k - \hat{x}_k^- \right)$$
 
 ---
 
