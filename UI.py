@@ -125,6 +125,7 @@ class OmniPulseUI(ctk.CTk):
             
         ctk_image = ctk.CTkImage(light_image=pil_image, dark_image=pil_image, size=(pil_image.width, pil_image.height))
         self.camera_label.configure(image=ctk_image, text="")
+        self.camera_label.image = ctk_image
 
     def update_state(self, bpm, wave_point, calib_pct, accuracy, advice_text):
         """API for main.py to push the new diagnostic data."""
