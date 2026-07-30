@@ -187,14 +187,21 @@ while cap.isOpened():
         
         current_brow_ratio = brow_dist / max(1.0, face_width)
         
-        # Motion check & Freeze Fix
+        # --- Motion check & Freeze Fix (UPDATED FOR HIGH-RES CAMERAS) ---
         nose_x, nose_y = int(landmarks[4].x * w), int(landmarks[4].y * h)
         if prev_nose_pos is not None:
             motion_magnitude = math.dist((nose_x, nose_y), prev_nose_pos)
-            if motion_magnitude > MOTION_THRESHOLD:
+            
+            # Dynamic thresholds: Scale allowed movement to 3% and 8% of the user's face width
+            # This makes the math identical whether on a 480p potato cam or a 4K studio lens
+            dynamic_warn_limit = face_w * 0.03 
+            dynamic_reset_limit = face_w * 0.08 
+            
+            if motion_magnitude > dynamic_warn_limit:
                 accuracy_score -= 30
                 advice_text, advice_color = "HOLD STILL - HEAD MOVED", (0, 165, 255)
-                if motion_magnitude > 20.0:
+                # If motion clears the buffer, forcefully reset the UI
+                if motion_magnitude > dynamic_reset_limit:
                     timestamps.clear(); rgb_buffer.clear(); wave_history.clear()
                     display_bpm = 0.0; current_stress_score = 0
         prev_nose_pos = (nose_x, nose_y)
@@ -246,7 +253,7 @@ while cap.isOpened():
 
         progress = min(100, int((len(rgb_buffer) / target_buffer_size) * 100))
 
-        if len(rgb_buffer) >= target_buffer_size and actual_fps > 15:
+        if len(rgb_buffer) >= target_buffer_size and actual_fps > 8:
             windowed_signal = pos_signal * np.hanning(len(pos_signal))
             fft_size = len(windowed_signal) * 4
             fft_data = np.abs(np.fft.rfft(windowed_signal, n=fft_size))
@@ -333,7 +340,7 @@ while cap.isOpened():
         
         cv2.putText(frame, f"COGNITIVE LOAD: {current_stress_score}%", (panel_x + 15, 150), cv2.FONT_HERSHEY_DUPLEX, 0.85, (150, 150, 150), 2)
         cv2.putText(frame, stress_text, (panel_x + 15, 190), cv2.FONT_HERSHEY_DUPLEX, 0.9, stress_color, 2)
-
+    cv2.putText(frame, f"REAL FPS: {actual_fps:.1f}", (30, 400), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 255, 255), 2)
     cv2.imshow(window_name, frame)
     if cv2.waitKey(1) & 0xFF == ord('q'): break
 
