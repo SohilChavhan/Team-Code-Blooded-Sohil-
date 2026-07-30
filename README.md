@@ -5,15 +5,14 @@
 ---
 
 ## 📌 Table of Contents
-- [Overview](#-overview)
-- [System Architecture](#-system-architecture)
-- [Biological Science Behind rPPG](#-biological-science-behind-rppg)
-- [Mathematical & Signal Processing Pipeline](#-mathematical--signal-processing-pipeline)
-- [Key Features](#-key-features)
-- [Tech Stack](#-tech-stack)
-- [Project Directory Structure](#-project-directory-structure)
-- [Getting Started](#-getting-started)
-- [API Reference](#-api-reference)
+- [Overview]
+- [System Architecture]
+- [Biological Science Behind rPPG]
+- [Mathematical & Signal Processing Pipeline]
+- [Key Features]
+- [Tech Stack]
+- [Getting Started]
+- [API Reference]
 
 ---
 
