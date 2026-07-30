@@ -18,9 +18,9 @@ try:
     AGE_CLASSES = ['[0-2]', '[4-6]', '[8-12]', '[15-20]', '[25-32]', '[38-43]', '[48-53]', '[60+]']
     has_age_net = True
     print("[SYSTEM] Age DNN Module Loaded Successfully.")
-except:
+except Exception as e:
     has_age_net = False
-    print("[WARNING] Age weights missing. Running Demographic Module in Demo Mode.")
+    print(f"[WARNING] Age weights missing. Error: {e}")
 
 # --- 3. KALMAN FILTER ---
 class KalmanFilter1D:
