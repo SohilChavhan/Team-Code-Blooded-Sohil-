@@ -6,7 +6,7 @@ import { supabase } from '../../services/supabase';
 
 // Use your computer's local IP address if running on physical device, e.g., 'ws://192.168.1.5:8000/ws/rppg'
 // Or 10.0.2.2 for Android Emulator
-const WS_URL = process.env.EXPO_PUBLIC_SERVER_URL || 'ws://10.0.2.2:8000/ws/rppg';
+const WS_URL = 'ws://10.23.215.16:5000/ws/rppg';
 
 export default function RppgMonitorScreen() {
     const [permission, requestPermission] = useCameraPermissions();
