@@ -1,0 +1,84 @@
+import React, { useState, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from '@react-navigation/native'; // Requires React Navigation
+
+export default function DoctorPortalScreen() {
+    const [patientVitals, setPatientVitals] = useState({
+        bpm: '--',
+        lastUpdated: 'Never'
+    });
+
+    // useFocusEffect triggers every time this screen becomes active
+    useFocusEffect(
+        useCallback(() => {
+            const fetchPatientData = async () => {
+                try {
+                    // Go fetch the saved vital from the phone's storage
+                    const savedBPM = await AsyncStorage.getItem('lastRecordedBPM');
+                    
+                    if (savedBPM !== null) {
+                        setPatientVitals({
+                            bpm: savedBPM,
+                            lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                        });
+                    }
+                } catch (error) {
+                    console.log("Failed to fetch patient vitals", error);
+                }
+            };
+
+            fetchPatientData();
+        }, [])
+    );
+
+    return (
+        <ScrollView style={styles.container}>
+            <View style={styles.header}>
+                <Text style={styles.headerText}>Doctor's Dashboard</Text>
+                <Text style={styles.subText}>Live Patient Monitoring</Text>
+            </View>
+
+            <View style={styles.patientCard}>
+                <View style={styles.cardHeader}>
+                    <Text style={styles.patientName}>John Doe</Text>
+                    <Text style={styles.patientStatus}>Stable</Text>
+                </View>
+
+                <View style={styles.vitalRow}>
+                    <View style={styles.vitalBox}>
+                        <Text style={styles.vitalLabel}>LAST RECORDED PULSE</Text>
+                        <Text style={styles.vitalValue}>
+                            {patientVitals.bpm !== '--' ? `♥ ${patientVitals.bpm} BPM` : 'No Data'}
+                        </Text>
+                    </View>
+                </View>
+
+                <Text style={styles.timestamp}>Last Scan: {patientVitals.lastUpdated}</Text>
+            </View>
+            
+            {/* Add more patients or action buttons down here */}
+            <TouchableOpacity style={styles.refreshButton}>
+                <Text style={styles.refreshText}>Request New Scan</Text>
+            </TouchableOpacity>
+        </ScrollView>
+    );
+}
+
+const styles = StyleSheet.create({
+    container: { flex: 1, backgroundColor: '#F3F4F6' },
+    header: { backgroundColor: '#0F766E', padding: 24, paddingTop: 60, paddingBottom: 30 },
+    headerText: { color: '#FFFFFF', fontSize: 24, fontWeight: 'bold' },
+    subText: { color: '#CCFBF1', fontSize: 14, marginTop: 4 },
+    patientCard: { backgroundColor: '#FFFFFF', margin: 16, padding: 20, borderRadius: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
+    cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, borderBottomWidth: 1, borderBottomColor: '#E5E7EB', paddingBottom: 12 },
+    patientName: { fontSize: 18, fontWeight: '700', color: '#111827' },
+    patientStatus: { backgroundColor: '#DEF7EC', color: '#03543F', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, fontSize: 12, fontWeight: '600' },
+    vitalRow: { flexDirection: 'row', justifyContent: 'space-between' },
+    vitalBox: { flex: 1, backgroundColor: '#F9FAFB', padding: 16, borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: '#F3F4F6' },
+    vitalLabel: { fontSize: 10, fontWeight: '700', color: '#6B7280', marginBottom: 8, letterSpacing: 1 },
+    vitalValue: { fontSize: 28, fontWeight: '900', color: '#DC2626' },
+    timestamp: { fontSize: 12, color: '#9CA3AF', textAlign: 'right', marginTop: 16 },
+    refreshButton: { backgroundColor: '#0F766E', marginHorizontal: 16, padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 8 },
+    refreshText: { color: '#FFFFFF', fontWeight: 'bold', fontSize: 16 },
+});

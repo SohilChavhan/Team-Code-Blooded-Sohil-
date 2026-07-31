@@ -1,123 +1,106 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, Alert } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import Svg, { Ellipse } from 'react-native-svg';
-import { supabase } from '../../services/supabase';
 
-// Use your computer's local IP address if running on physical device, e.g., 'ws://192.168.1.5:8000/ws/rppg'
-// Or 10.0.2.2 for Android Emulator
-const WS_URL = 'ws://10.23.215.16:5000/ws/rppg';
+const WS_URL = 'ws://xx.xxx.xx.xxx:xxxx'; // Put your PC's IP here
 
 export default function RppgMonitorScreen() {
     const [permission, requestPermission] = useCameraPermissions();
     const [isScanning, setIsScanning] = useState(false);
     
-    // UI State for live data
-    const [bpm, setBpm] = useState(0);
-    const [status, setStatus] = useState("ALIGN FACE INSIDE OVAL");
-    const [accuracy, setAccuracy] = useState(0);
-    const [progress, setProgress] = useState(0);
-    
+    const [hudData, setHudData] = useState({
+        bpm: 0,
+        accuracy: 0,
+        status: "STANDBY",
+        age: "--",
+        stress: 0
+    });
+
+    const wsRef = useRef<WebSocket | null>(null);
     const cameraRef = useRef<CameraView>(null);
-    const ws = useRef<WebSocket | null>(null);
-    const frameLoop = useRef<NodeJS.Timeout | null>(null);
+    const loopRef = useRef<boolean>(false);
 
     useEffect(() => {
+        const connectWebSocket = () => {
+            console.log("Connecting to Python Server...");
+            const ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('Connected to OmniPulse Python Engine');
+                wsRef.current = ws;
+            };
+            
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    setHudData(data);
+                } catch (err) {
+                    console.log("Parse error", err);
+                }
+            };
+            
+            ws.onerror = (e) => console.log('WebSocket Error: ', e);
+            ws.onclose = () => {
+                console.log('WebSocket Disconnected');
+                wsRef.current = null;
+                setIsScanning(false);
+                loopRef.current = false;
+            };
+        };
+
+        connectWebSocket();
         return () => {
-            stopScan();
+            if (wsRef.current) wsRef.current.close();
+            loopRef.current = false;
         };
     }, []);
 
-    const stopScan = () => {
-        setIsScanning(false);
-        setStatus("ALIGN FACE INSIDE OVAL");
-        if (frameLoop.current) clearInterval(frameLoop.current);
-        if (ws.current) ws.current.close();
-    };
-
-    const syncToDoctor = async (finalBpm: number) => {
-        const { error } = await supabase
-            .from('reports')
-            .insert([{
-                patient_name: 'Alex Johnson',
-                bpm: finalBpm,
-                accuracy: 98,
-                status: finalBpm > 90 ? 'Elevated' : 'Normal'
-            }]);
-        if (!error) {
-            Alert.alert("Scan Synced", `Heart rate of ${finalBpm} BPM synced to doctor.`);
-        }
-    };
-
-    const handleScan = async () => {
-        if (isScanning) {
-            stopScan();
+    const captureLoop = async () => {
+        // 1. Initial check
+        if (!loopRef.current || !cameraRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
             return;
         }
 
-        setIsScanning(true);
-        setStatus("CONNECTING TO ENGINE...");
-
         try {
-            ws.current = new WebSocket(WS_URL);
-            
-            ws.current.onopen = () => {
-                setStatus("ENGINE CONNECTED - ACQUIRING BASELINE");
-                startFrameStreaming();
-            };
+            const photo = await cameraRef.current.takePictureAsync({
+                base64: true,
+                quality: 0.5, // Up from 0.2
+                scale: 0.3,
+                skipProcessing: true,
+            });
 
-            ws.current.onmessage = async (e) => {
-                const data = JSON.parse(e.data);
-                
-                if (data.bpm) setBpm(data.bpm);
-                if (data.accuracy) setAccuracy(data.accuracy);
-                if (data.progress) setProgress(data.progress);
-                if (data.diagnostic_reason) setStatus(data.diagnostic_reason);
-                
-                // Demo logic: once we hit 100% progress and have a good reading, sync it
-                if (data.progress === 100 && data.bpm > 0) {
-                    syncToDoctor(data.bpm);
-                    stopScan(); // Auto-stop after successful scan
-                }
-            };
+            // 2. THE CRITICAL GHOST-FRAME CHECK: 
+            // Did the user press "Stop" while we were waiting for the camera?
+            if (!loopRef.current) return; 
 
-            ws.current.onerror = (e) => {
-                setStatus("ENGINE CONNECTION ERROR");
-                stopScan();
-            };
-
-            ws.current.onclose = () => {
-                stopScan();
-            };
-
+            if (photo && photo.base64) {
+                wsRef.current.send(photo.base64);
+            }
         } catch (error) {
-            setStatus("FAILED TO CONNECT");
-            stopScan();
+            console.log("Capture Error: ", error);
+        }
+
+        if (loopRef.current) {
+            setTimeout(captureLoop, 50); 
         }
     };
 
-    const startFrameStreaming = () => {
-        // Stream frames at ~10 FPS (100ms interval) to the Python engine
-        frameLoop.current = setInterval(async () => {
-            if (cameraRef.current && ws.current?.readyState === WebSocket.OPEN) {
-                try {
-                    const photo = await cameraRef.current.takePictureAsync({
-                        base64: true,
-                        quality: 0.1, // very low quality to reduce latency/bandwidth
-                        skipProcessing: true,
-                    });
-                    if (photo && photo.base64) {
-                        ws.current.send(photo.base64);
-                    }
-                } catch (e) {
-                    console.log("Frame drop");
-                }
+    const toggleScan = () => {
+        if (isScanning) {
+            setIsScanning(false);
+            loopRef.current = false;
+        } else {
+            if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+                alert("Cannot connect to Python Server.");
+                return;
             }
-        }, 150); 
+            setIsScanning(true);
+            loopRef.current = true;
+            captureLoop();
+        }
     };
 
-    if (!permission) return <View style={styles.centerContainer}><Text>Requesting permission...</Text></View>;
-    if (!permission.granted) {
+    if (!permission || !permission.granted) {
         return (
             <SafeAreaView style={styles.centerContainer}>
                 <Text style={styles.permText}>Camera permission is required.</Text>
@@ -130,32 +113,52 @@ export default function RppgMonitorScreen() {
 
     return (
         <View style={styles.container}>
-            <CameraView ref={cameraRef} style={StyleSheet.absoluteFillObject} facing="front" />
-            <Svg height="100%" width="100%" viewBox="0 0 100 100" style={StyleSheet.absoluteFillObject}>
-                <Ellipse cx="50" cy="42" rx="26" ry="36" stroke={isScanning ? "#16A34A" : "#14B8A6"} strokeWidth="1.5" strokeDasharray="4, 2" fill="none" />
-            </Svg>
+            <CameraView 
+                ref={cameraRef} 
+                style={StyleSheet.absoluteFillObject} 
+                facing="front" 
+            />
 
-            <View style={styles.overlayHeader}>
-                <View style={styles.guideBadge}>
-                    <Text style={styles.guideText}>
-                        {status} {isScanning && progress > 0 ? `(${progress}%)` : ""}
+            {/* Outside Slot Cards */}
+            <View style={styles.hudContainer}>
+                <View style={styles.hudCard}>
+                    <Text style={styles.hudLabel}>ACCURACY</Text>
+                    <Text style={[styles.hudValue, { color: hudData.accuracy > 70 ? '#4ADE80' : '#F87171' }]}>
+                        {hudData.accuracy}%
                     </Text>
                 </View>
-                {isScanning && bpm > 0 && (
-                    <View style={styles.liveBpmBadge}>
-                        <Text style={styles.liveBpmText}>{bpm} BPM</Text>
-                        <Text style={styles.liveAccText}>Acc: {accuracy}%</Text>
-                    </View>
-                )}
+
+                <View style={styles.hudCard}>
+                    <Text style={styles.hudLabel}>LIVE PULSE</Text>
+                    <Text style={styles.hudValue}>{hudData.bpm > 0 ? `${Math.round(hudData.bpm)} BPM` : 'CALIBRATING'}</Text>
+                </View>
+
+                <View style={styles.hudCard}>
+                    <Text style={styles.hudLabel}>EST. AGE</Text>
+                    <Text style={styles.hudValue}>{hudData.age}</Text>
+                </View>
+            </View>
+
+            {/* In-Feed Floating Banner Overlay showing live BPM directly inside the camera view */}
+            <View style={styles.inFeedBanner}>
+                <Text style={styles.inFeedTitle}>OMNIPULSE BIO-FEED</Text>
+                <Text style={styles.inFeedBpm}>
+                    {hudData.bpm > 0 ? `♥ ${Math.round(hudData.bpm)} BPM` : '♥ calibrating...'}
+                </Text>
+                <Text style={styles.inFeedSub}>Age Group: {hudData.age}</Text>
+            </View>
+
+            <View style={styles.statusBanner}>
+                <Text style={styles.statusText}>{hudData.status}</Text>
             </View>
 
             <View style={styles.overlayFooter}>
                 <TouchableOpacity
                     style={[styles.scanActionBtn, isScanning && styles.scanActionBtnActive]}
-                    onPress={handleScan}
+                    onPress={toggleScan}
                 >
                     <Text style={styles.scanActionText}>
-                        {isScanning ? "Stop Biometric Capture" : "Begin Biometric Capture"}
+                        {isScanning ? "Stop Transmission" : "Connect & Stream to Engine"}
                     </Text>
                 </TouchableOpacity>
             </View>
@@ -169,12 +172,16 @@ const styles = StyleSheet.create({
     permText: { fontSize: 16, textAlign: 'center', color: '#111827', marginBottom: 20 },
     permBtn: { backgroundColor: '#DC2626', paddingHorizontal: 20, paddingVertical: 12, borderRadius: 10 },
     permBtnText: { color: '#FFFFFF', fontWeight: '700' },
-    overlayHeader: { position: 'absolute', top: 30, left: 0, right: 0, alignItems: 'center' },
-    guideBadge: { backgroundColor: '#000000B3', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
-    guideText: { color: '#14B8A6', fontSize: 12, fontWeight: '700', letterSpacing: 0.5 },
-    liveBpmBadge: { backgroundColor: '#000000B3', paddingHorizontal: 16, paddingVertical: 12, borderRadius: 12, marginTop: 12, alignItems: 'center' },
-    liveBpmText: { color: '#FFFFFF', fontSize: 24, fontWeight: '800' },
-    liveAccText: { color: '#14B8A6', fontSize: 12, fontWeight: '700', marginTop: 4 },
+    hudContainer: { position: 'absolute', top: 50, left: 20, right: 20, flexDirection: 'row', justifyContent: 'space-between' },
+    hudCard: { backgroundColor: 'rgba(0,0,0,0.75)', padding: 10, borderRadius: 10, alignItems: 'center', flex: 1, marginHorizontal: 4, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
+    hudLabel: { color: '#9CA3AF', fontSize: 9, fontWeight: '700', marginBottom: 2 },
+    hudValue: { color: '#FFFFFF', fontSize: 14, fontWeight: 'bold' },
+    inFeedBanner: { position: 'absolute', top: 125, left: 20, right: 20, backgroundColor: 'rgba(15, 23, 42, 0.85)', padding: 14, borderRadius: 12, alignItems: 'center', borderWidth: 1, borderColor: '#0F766E' },
+    inFeedTitle: { color: '#2DD4BF', fontSize: 10, fontWeight: '800', letterSpacing: 1 },
+    inFeedBpm: { color: '#FFFFFF', fontSize: 26, fontWeight: '900', marginVertical: 2 },
+    inFeedSub: { color: '#94A3B8', fontSize: 11, fontWeight: '600' },
+    statusBanner: { position: 'absolute', top: 210, left: 20, right: 20, backgroundColor: 'rgba(15, 118, 110, 0.8)', padding: 8, borderRadius: 8, alignItems: 'center' },
+    statusText: { color: '#FFFFFF', fontWeight: '600', fontSize: 12 },
     overlayFooter: { position: 'absolute', bottom: 40, left: 20, right: 20 },
     scanActionBtn: { backgroundColor: '#0F766E', paddingVertical: 16, borderRadius: 12, alignItems: 'center' },
     scanActionBtnActive: { backgroundColor: '#DC2626' },
